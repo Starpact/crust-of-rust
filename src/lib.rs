@@ -4,3 +4,4 @@
 mod channel;
 mod func;
 mod iterator;
+mod sort;
