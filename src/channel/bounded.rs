@@ -1,9 +1,6 @@
 use std::{
     collections::VecDeque,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Condvar, Mutex,
-    },
+    sync::{Arc, Condvar, Mutex},
 };
 
 pub struct BoundedSender<T> {
@@ -12,18 +9,17 @@ pub struct BoundedSender<T> {
 
 pub struct BoundedReceiver<T> {
     shared: Arc<Shared<T>>,
-    buffer: VecDeque<T>,
 }
 
 struct Shared<T> {
     inner: Mutex<Inner<T>>,
-    nmessages: AtomicUsize,
     send_waker: Condvar,
     recv_waker: Condvar,
 }
 
 struct Inner<T> {
     queue: VecDeque<T>,
+    nmessages: usize,
     nsenders: usize,
 }
 
@@ -31,9 +27,9 @@ pub fn bounded<T>(capacity: usize) -> (BoundedSender<T>, BoundedReceiver<T>) {
     let shared = Shared {
         inner: Mutex::new(Inner {
             queue: VecDeque::with_capacity(capacity),
+            nmessages: 0,
             nsenders: 1,
         }),
-        nmessages: AtomicUsize::new(0),
         send_waker: Condvar::new(),
         recv_waker: Condvar::new(),
     };
@@ -43,10 +39,7 @@ pub fn bounded<T>(capacity: usize) -> (BoundedSender<T>, BoundedReceiver<T>) {
         BoundedSender {
             shared: shared.clone(),
         },
-        BoundedReceiver {
-            shared,
-            buffer: VecDeque::with_capacity(capacity),
-        },
+        BoundedReceiver { shared },
     )
 }
 
@@ -81,12 +74,12 @@ impl<T> Iterator for BoundedReceiver<T> {
 impl<T> BoundedSender<T> {
     pub fn send(&self, v: T) {
         let mut inner = self.shared.inner.lock().unwrap();
-        if self.shared.nmessages.load(Ordering::SeqCst) == inner.queue.capacity() {
+        if inner.nmessages == inner.queue.capacity() {
             inner = self.shared.send_waker.wait(inner).unwrap();
         }
 
         inner.queue.push_back(v);
-        self.shared.nmessages.fetch_add(1, Ordering::SeqCst);
+        inner.nmessages += 1;
         drop(inner);
         self.shared.recv_waker.notify_one();
     }
@@ -94,20 +87,11 @@ impl<T> BoundedSender<T> {
 
 impl<T> BoundedReceiver<T> {
     pub fn recv(&mut self) -> Option<T> {
-        if let head @ Some(_) = self.buffer.pop_front() {
-            self.shared.send_waker.notify_one();
-            self.shared.nmessages.fetch_sub(1, Ordering::SeqCst);
-            return head;
-        }
-
         let mut inner = self.shared.inner.lock().unwrap();
         loop {
             match inner.queue.pop_front() {
                 Some(t) => {
-                    if !inner.queue.is_empty() {
-                        std::mem::swap(&mut self.buffer, &mut inner.queue);
-                    }
-                    self.shared.nmessages.fetch_sub(1, Ordering::SeqCst);
+                    inner.nmessages -= 1;
                     drop(inner);
                     self.shared.send_waker.notify_one();
                     return Some(t);
@@ -152,6 +136,7 @@ mod tests {
         }
         drop(tx);
 
+        std::thread::sleep(std::time::Duration::from_secs(1));
         for x in rx {
             println!("{} received", x);
             std::thread::sleep(std::time::Duration::from_secs(1));
