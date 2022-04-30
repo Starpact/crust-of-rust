@@ -1,6 +1,9 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
+    },
 };
 
 pub struct BoundedSender<T> {
@@ -14,13 +17,13 @@ pub struct BoundedReceiver<T> {
 
 struct Shared<T> {
     inner: Mutex<Inner<T>>,
+    nmessages: AtomicUsize,
     send_waker: Condvar,
     recv_waker: Condvar,
 }
 
 struct Inner<T> {
     queue: VecDeque<T>,
-    nmessages: usize,
     nsenders: usize,
 }
 
@@ -28,9 +31,9 @@ pub fn bounded<T>(capacity: usize) -> (BoundedSender<T>, BoundedReceiver<T>) {
     let shared = Shared {
         inner: Mutex::new(Inner {
             queue: VecDeque::with_capacity(capacity),
-            nmessages: 0,
             nsenders: 1,
         }),
+        nmessages: AtomicUsize::new(0),
         send_waker: Condvar::new(),
         recv_waker: Condvar::new(),
     };
@@ -78,12 +81,12 @@ impl<T> Iterator for BoundedReceiver<T> {
 impl<T> BoundedSender<T> {
     pub fn send(&self, v: T) {
         let mut inner = self.shared.inner.lock().unwrap();
-        if inner.nmessages == inner.queue.capacity() {
+        if self.shared.nmessages.load(Ordering::SeqCst) == inner.queue.capacity() {
             inner = self.shared.send_waker.wait(inner).unwrap();
         }
 
         inner.queue.push_back(v);
-        inner.nmessages += 1;
+        self.shared.nmessages.fetch_add(1, Ordering::SeqCst);
         drop(inner);
         self.shared.recv_waker.notify_one();
     }
@@ -92,6 +95,8 @@ impl<T> BoundedSender<T> {
 impl<T> BoundedReceiver<T> {
     pub fn recv(&mut self) -> Option<T> {
         if let head @ Some(_) = self.buffer.pop_front() {
+            self.shared.send_waker.notify_one();
+            self.shared.nmessages.fetch_sub(1, Ordering::SeqCst);
             return head;
         }
 
@@ -102,7 +107,7 @@ impl<T> BoundedReceiver<T> {
                     if !inner.queue.is_empty() {
                         std::mem::swap(&mut self.buffer, &mut inner.queue);
                     }
-                    inner.nmessages -= 1;
+                    self.shared.nmessages.fetch_sub(1, Ordering::SeqCst);
                     drop(inner);
                     self.shared.send_waker.notify_one();
                     return Some(t);
@@ -136,9 +141,9 @@ mod tests {
 
     #[test]
     fn iter() {
-        let (tx, rx) = bounded(1);
+        let (tx, rx) = bounded(3);
 
-        for i in 0..10 {
+        for i in 0..3 {
             let tx = tx.clone();
             std::thread::spawn(move || {
                 tx.send(i);
