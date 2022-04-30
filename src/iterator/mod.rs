@@ -155,4 +155,13 @@ mod test {
         assert_eq!(iter.next(), None);
         assert_eq!(iter.next_back(), None);
     }
+
+    #[test]
+    fn test() {
+        let iter = vec![1, 2, 3].into_iter();
+        println!("{}", std::mem::size_of_val(&iter));
+        let a = 1;
+        let iter = iter.map(|x| x * a);
+        println!("{}", std::mem::size_of_val(&iter));
+    }
 }
