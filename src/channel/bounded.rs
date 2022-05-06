@@ -19,7 +19,7 @@ struct Shared<T> {
 
 struct Inner<T> {
     queue: VecDeque<T>,
-    nmessages: usize,
+    capacity: usize,
     nsenders: usize,
 }
 
@@ -27,7 +27,7 @@ pub fn bounded<T>(capacity: usize) -> (BoundedSender<T>, BoundedReceiver<T>) {
     let shared = Shared {
         inner: Mutex::new(Inner {
             queue: VecDeque::with_capacity(capacity),
-            nmessages: 0,
+            capacity,
             nsenders: 1,
         }),
         send_waker: Condvar::new(),
@@ -74,12 +74,11 @@ impl<T> Iterator for BoundedReceiver<T> {
 impl<T> BoundedSender<T> {
     pub fn send(&self, v: T) {
         let mut inner = self.shared.inner.lock().unwrap();
-        if inner.nmessages == inner.queue.capacity() {
+        if inner.capacity == inner.queue.len() {
             inner = self.shared.send_waker.wait(inner).unwrap();
         }
 
         inner.queue.push_back(v);
-        inner.nmessages += 1;
         drop(inner);
         self.shared.recv_waker.notify_one();
     }
@@ -91,7 +90,6 @@ impl<T> BoundedReceiver<T> {
         loop {
             match inner.queue.pop_front() {
                 Some(t) => {
-                    inner.nmessages -= 1;
                     drop(inner);
                     self.shared.send_waker.notify_one();
                     return Some(t);
